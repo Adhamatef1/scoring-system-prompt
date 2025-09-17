@@ -1,0 +1,265 @@
+[ROLE]  
+You are a senior backend+AI engineer. Your task: implement a production-ready, deterministic, auditable Scoring Microservice ("Grader") that automatically grades participant submissions for a mobile-first 5-battle competitive game. The microservice ONLY handles grading (not mobile UI, not full app). It must support hybrid evidence sources:  
+(1) structured testcases and reference data stored in Excel sheets on Google Drive (acting as the canonical database), and  
+(2) live web evidence from a provided source_link.  
+The system must be deterministic, explainable, and auditable.
+
+[GOALS / SUMMARY]  
+Grade submissions automatically according to the rules below and return a full, field-level JSON breakdown with evidence snippets and diagnostics.  
+If a claimed fact is not present at the provided source (exact URL, verified Excel reference snapshot), that claim must score zero.  
+The AI covers 85% of the original rubric (DataAccuracy 60%, Speed 10%, Source Link 15%); normalize per-battle so grader returns 20 points per battle (5 battles = 100 final).  
+Provide clear conflict resolution between Excel records and submitted source_link.  
+Provide human-in-the-loop escalation rules and audit trail.
+
+[API CONTRACTS]  
+POST /grade_submission  
+Request body (JSON):  
+```json
+{
+  "team":"Alpha" | "Delta",
+  "battle_no": 1..5,
+  "submission_id":"string-uuid",
+  "submitted_at":"ISO8601",
+  "time_taken_seconds": int,
+  "total_time_seconds": int,
+  "company_reference": {
+    "company_id":"uuid",
+    "use_excel_as_primary": boolean
+  } | null,
+  "source_link": "https://..." | null,
+  "fields": { ... battle-specific claimed fields ... },
+  "attachments": [
+    {"type":"screenshot|pdf","url":"https://..."}
+  ]
+}
+Response body (JSON) — MUST follow exactly:
+
+json
+Copy code
+{
+  "submission_id":"string",
+  "team":"Alpha",
+  "battle_no":1,
+  "raw_ai_percent": 0.0,
+  "scaled_battle_percent": 0.0,
+  "battle_points_out_of_20": 0.0,
+  "breakdown": {
+    "data_accuracy_raw": 0.0,
+    "speed_raw": 0.0,
+    "source_raw": 0.0,
+    "data_accuracy_details": [
+      {
+        "field":"founder_1",
+        "submitted":"Jane Doe",
+        "found_in_source": true,
+        "match_score": 0.0,
+        "weight": 12.0,
+        "contribution": 11.52,
+        "evidence_snippets":[
+          {
+            "snapshot_path":"s3://.../snap.html",
+            "xpath":"...",
+            "start_offset":100,
+            "end_offset":140,
+            "text_snippet":"..."
+          }
+        ]
+      }
+    ],
+    "source_credibility": 0.0,
+    "source_verified": true,
+    "matched_from_excel": true,
+    "excel_company_id": "uuid|null",
+    "excel_verified": true
+  },
+  "diagnostics": {
+    "missing_fields":[...],
+    "evidence_not_found_for":[...],
+    "fetch_warnings":[...],
+    "conflict_details": {...}
+  },
+  "escalated_for_human_review": true|false,
+  "confidence": 0.0,
+  "explain_text":"human-readable explanation"
+}
+[SCORING FORMULA — EXACT]
+Per battle, AI-gradeable parts = DataAccuracy(60) + Speed(10) + SourceLink(15) = 85 (original).
+raw_ai_percent = sum of the three parts (range 0..85).
+scaled_battle_percent = (raw_ai_percent / 85) * 100.
+battle_points_out_of_20 = scaled_battle_percent / 100 * 20.
+Final app score = Σ battle_points_out_of_20 (for battles 1..5) => range 0..100.
+
+[VALIDATION & MATCHING RULES — DETERMINISTIC]
+
+Names: normalize (casefold, trim, punctuation, diacritics), similarity with token_sort_ratio. ≥0.90 full, 0.70–0.90 linear partial, <0.70 zero.
+
+Dates: exact or ±1 year full credit, else zero.
+
+Numeric amounts: ±5% full, ±5–10% linear partial, >10% zero.
+
+Percentages: ±2 full, ±2–5 linear, >5 zero.
+
+Categories: sim ≥0.85 for acceptance.
+
+Presence Rule: field must be verified in Excel snapshot (if use_excel_as_primary==true) or provided source_link. If not → score 0.
+
+[Source Link scoring (15)]
+
+presence_flag = 1 if evidence snippet found in Excel or source_link, else 0.
+
+source_credibility heuristic: filings=0.95, company domain=0.90, Reuters/Bloomberg=0.85, Crunchbase=0.80, blogs=0.40–0.60.
+
+source_raw = presence_flag * source_credibility * 15.
+
+HYBRID BEHAVIOR & CONFLICT RESOLUTION]
+
+If company_reference exists:
+
+If excel_verified==true AND use_excel_as_primary==true: use Excel snapshot, skip web fetch. matched_from_excel=true.
+
+Else: fetch source_link. Compare Excel vs web.
+
+Search Fallback Rule:
+If a claimed field is missing in the Excel snapshot (or company_reference is null), the system must automatically attempt to search and validate that field using the provided source_link (live web evidence). If the information is not found in either Excel or the source_link, that field must strictly score zero.
+
+Resolve conflicts:
+
+If excel_verified==true → prefer Excel, log conflict, escalate if confidence<0.75.
+
+If excel_verified==false → prefer source evidence, escalate if credibility low.
+
+[Speed scoring (10)]
+
+Tiered scale (total_time=60 mins):
+
+0–10 mins → 10/10
+
+11–20 mins → 8/10
+
+21–30 mins → 6/10
+
+31–40 mins → 4/10
+
+41–50 mins → 2/10
+
+51–60 mins → 1/10
+
+60 mins → 0/10
+
+Formula fallback:
+
+ini
+Copy code
+time_left_ratio = max(0, (total_time_seconds - time_taken_seconds) / total_time_seconds)
+speed_raw = time_left_ratio * 10
+[DataAccuracy (60)]
+Each battle has field weights summing to 60. DataAccuracy_raw = Σ (weight × match_score).
+
+[HYBRID BEHAVIOR & CONFLICT RESOLUTION]
+
+If company_reference exists:
+
+If excel_verified==true AND use_excel_as_primary==true: use Excel snapshot, skip web fetch. matched_from_excel=true.
+
+Else: fetch source_link. Compare Excel vs web. Resolve conflicts:
+
+If excel_verified==true → prefer Excel, log conflict, escalate if confidence<0.75.
+
+If excel_verified==false → prefer source evidence, escalate if credibility low.
+
+[SCRAPING & EVIDENCE EXTRACTION RULES]
+
+Only fetch exact source_link.
+
+GET with timeout, fallback to Playwright.
+
+If PDF → pdfminer/tika, OCR if needed.
+
+Extract text, DOM, tables.
+
+Save evidence snippet with snapshot_path, selector, offsets, snippet.
+
+Respect robots.txt.
+
+[AUDIT, LOGGING & PRIVACY]
+
+Persist payload, Excel snapshot, evidence snippets, scores, diagnostics.
+
+Logs immutable + versioned.
+
+Redact PII.
+
+ACL-protect evidence.
+
+[HUMAN-IN-THE-LOOP RULES]
+Escalate if: confidence<0.75, source_credibility<0.5, ≥2 fields missing evidence, or major conflicts.
+Provide admin endpoints to resolve conflicts and override.
+
+[CONFIGURATION]
+
+All thresholds configurable via JSON/YAML.
+
+Example battle weights:
+Battle1 {founders:12,key_execs:18,market_share:20,geographic:10}
+Battle2 {product_lines:30,pricing:15,social:20,influencers:15}
+Battle3 {funding:40,investors:20,revenue:25,citations:15}
+Battle4 {b2c:25,b2b:25,reviews:25,citations:25}
+Battle5 {partners:25,suppliers:20,growth:25,expansions:15,citations:15}
+
+[TESTS & QA]
+
+Unit tests for matching heuristics.
+
+Integration with mock Excel + scraper.
+
+End-to-end example with Excel record + submission.
+
+OpenAPI spec.
+
+[SECURITY & OPERATIONAL]
+
+API auth (keys/JWT), rate limits.
+
+Cache snapshots (TTL).
+
+Background jobs for fetches.
+
+Failure modes: best-effort sync or enqueue async.
+
+[EXAMPLE INPUT/OUTPUT]
+Request:
+
+json
+Copy code
+{ "team":"Alpha","battle_no":1,"submission_id":"sub-001","time_taken_seconds":1200,"total_time_seconds":1800,"company_reference":{"company_id":"uuid-1","use_excel_as_primary":true},"fields":{"company_name":"Example Co","founders":[{"name":"Jane Doe"}],"founding_year":2018} }
+Response snippet:
+
+json
+Copy code
+{ "submission_id":"sub-001","raw_ai_percent":64.0,"scaled_battle_percent":75.29,"battle_points_out_of_20":15.05,"breakdown":{"data_accuracy_raw":44.0,"speed_raw":8.0,"source_raw":12.0,"source_credibility":0.85,"source_verified":true},"diagnostics":{},"escalated_for_human_review":false,"confidence":0.91 }
+[TECH STACK]
+
+Python, FastAPI, httpx, Playwright, pdfminer/tika, pytesseract, rapidfuzz, sentence-transformers.
+
+Excel I/O: pandas + gspread/Google Drive API.
+
+Storage: S3/MinIO.
+
+Queue: Redis+Celery.
+
+Containerized (Docker).
+
+Monitoring: Prometheus+Grafana.
+
+[OPERATIONS & SLA]
+
+Sync Excel-only grading <500ms p95.
+
+Async web fetch with queue + callbacks.
+
+Quotas per team.
+
+[FINAL INSTRUCTION]
+Return code & tests implementing all above. Ensure determinism, audit trail, strict presence rule (if not in Excel or provided source → zero). Provide admin guide and Docker Compose demo.
+
+End of prompt.
