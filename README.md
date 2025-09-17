@@ -116,7 +116,7 @@ Implement these exact rules (configurable thresholds in a JSON config):
    - source_raw = presence_flag * source_credibility * 15.
    - If presence_flag==0 -> source_raw = 0 and evidence_not_found_for should include the missing claims.
 
-8. Speed scoring (out of 10)
+8. Speed scoring (out of 10) the game time is 60 mins
    - time_left_ratio = max(0, (total_time_seconds - time_taken_seconds) / total_time_seconds)
    - speed_raw = time_left_ratio * 10
    - If time_taken > total_time -> speed_raw = 0
